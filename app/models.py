@@ -22,6 +22,8 @@ class NormalizedConfig(BaseModel):
     device: DeviceInfo
     controls: dict[str, Any]
     unknown_lines: list[Evidence] = Field(default_factory=list)
+    evidence: dict[str, list[Evidence]] = Field(default_factory=dict)
+    parser_stats: dict[str, Any] = Field(default_factory=dict)
 
 
 class Control(BaseModel):
