@@ -67,10 +67,16 @@ def run_pipeline(path: str) -> AnalysisResult:
     validate_normalized(normalized)
 
     controls = load_controls(PROJECT_ROOT / "config" / "controls.json")
-    # Temporary demo control set is filtered by vendor.
+    # Vendor controls are selected deterministically. For conditional controls
+    # (for example BGP authentication), the parser creates the field only when
+    # that feature is actually present in the configuration. This prevents an
+    # unrelated device from receiving a false UNKNOWN finding for an unused
+    # feature while keeping missing observations for applicable controls UNKNOWN.
     vendor_controls = [
         c for c in controls
-        if c.enabled and c.source.startswith(f"demo:{detection.vendor}:")
+        if c.enabled
+        and c.source.startswith(f"{detection.vendor}:")
+        and c.field in normalized.controls
     ]
 
     findings = evaluate(normalized, vendor_controls)
@@ -101,6 +107,7 @@ def run_pipeline(path: str) -> AnalysisResult:
         "overall_risk_score": overall_risk_score,
         "overall_risk_level": overall_risk_level,
         "parser_unknown_count": len(normalized.unknown_lines),
+        "parser_stats": normalized.parser_stats,
     }
 
     ai_service = GroqAIService()

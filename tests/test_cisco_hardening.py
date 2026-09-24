@@ -20,7 +20,7 @@ def test_real_c2911_configuration_is_parsed_without_ai():
     assert result.controls["urpf_interface_count"] >= 1
     assert result.controls["netflow_configured"] is True
     assert result.parser_stats["ai_used_by_parser"] is False
-    assert result.parser_stats["total_source_lines"] == 593
+    assert result.parser_stats["total_source_lines"] == 592
     assert result.parser_stats["coverage_percent"] > 90
 
 
@@ -80,3 +80,12 @@ def test_only_explicit_custom_command_is_unknown():
         "x.conf",
     )
     assert any(x.source == "x-security-profile audit-advanced" for x in result.unknown_lines)
+
+
+def test_pipeline_uses_expanded_cisco_control_catalog():
+    from app.pipeline import run_pipeline
+
+    result = run_pipeline(str(FIXTURE))
+    assert result.summary["total_controls"] >= 50
+    assert result.summary["total_controls"] > 4
+    assert result.summary["parser_stats"]["coverage_percent"] > 90

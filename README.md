@@ -128,3 +128,35 @@ When Member 1's repository is ready:
 2. Replace the temporary demo control definitions with Member 1's approved controls.
 3. Replace the temporary parser schema with DATA_MODEL.md.
 4. Keep the deterministic compliance engine separate from AI.
+
+## 7. Frontend + API
+
+This local prototype also includes a simple frontend connected to the existing pipeline.
+
+Start the API/frontend from the project root:
+
+```powershell
+python -m uvicorn web_api:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Or:
+
+```powershell
+.\run_web.ps1
+```
+
+Open:
+
+```text
+http://127.0.0.1:8000
+```
+
+The browser uploads the selected configuration to:
+
+```text
+POST /api/v1/analyses
+```
+
+The endpoint writes the uploaded text to a temporary local file, calls the existing `run_pipeline()` function, returns the same deterministic analysis result, and deletes the temporary file.
+
+The frontend does not implement compliance logic. It only displays the backend result.
