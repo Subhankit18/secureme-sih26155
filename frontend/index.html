@@ -594,6 +594,7 @@
         <div class="top-actions">
           <button class="btn" id="themeBtn" type="button" title="Switch to dark mode">Dark mode</button>
           <button class="btn" id="downloadJsonBtn" disabled>Download JSON</button>
+          <button class="btn" id="downloadPdfBtn" disabled>Download PDF</button>
           <button class="btn primary" id="newAnalysisBtn">New Analysis</button>
         </div>
       </header>
@@ -805,6 +806,7 @@
     const analyzeBtn = document.getElementById('analyzeBtn');
     const newAnalysisBtn = document.getElementById('newAnalysisBtn');
     const downloadJsonBtn = document.getElementById('downloadJsonBtn');
+    const downloadPdfBtn = document.getElementById('downloadPdfBtn');
     const copyJsonBtn = document.getElementById('copyJsonBtn');
     const uploadMeta = document.getElementById('uploadMeta');
     const statusMsg = document.getElementById('statusMsg');
@@ -885,6 +887,7 @@
       uploadMeta.textContent = 'Supported: .conf, .cfg, .txt, .log';
       setStatus('');
       downloadJsonBtn.disabled = true;
+      downloadPdfBtn.disabled = true;
       document.getElementById('kpiRisk').textContent='—';
       document.getElementById('kpiRiskFoot').textContent='No analysis loaded';
       document.getElementById('kpiCompliance').textContent='—';
@@ -1120,6 +1123,7 @@
     function render(data){
       currentData=data;
       downloadJsonBtn.disabled=false;
+      downloadPdfBtn.disabled=false;
 
       const s=data.summary || {};
       const total=Number(s.total_controls||0);
@@ -1199,6 +1203,39 @@
       a.download=`secureme-analysis-${currentData.analysis_id || 'result'}.json`;
       a.click();
       URL.revokeObjectURL(url);
+    });
+
+
+    downloadPdfBtn.addEventListener('click',async()=>{
+      if(!currentData?.analysis_id) return;
+      downloadPdfBtn.disabled=true;
+      const old=downloadPdfBtn.textContent;
+      downloadPdfBtn.textContent='Generating…';
+      try{
+        const res=await fetch(`/api/v1/analyses/${encodeURIComponent(currentData.analysis_id)}/pdf`);
+        if(!res.ok){
+          let message='PDF generation failed.';
+          try{
+            const data=await res.json();
+            message=data.detail || message;
+          }catch{}
+          throw new Error(message);
+        }
+        const blob=await res.blob();
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a');
+        a.href=url;
+        a.download=`secureme-analysis-${currentData.analysis_id}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      }catch(err){
+        setStatus(err?.message || 'PDF download failed.',true);
+      }finally{
+        downloadPdfBtn.disabled=false;
+        downloadPdfBtn.textContent=old;
+      }
     });
 
     newAnalysisBtn.addEventListener('click',()=>{

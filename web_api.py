@@ -3,12 +3,16 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+import io
+import json
+import re
 from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from app.pipeline import ALLOWED_EXTENSIONS, _max_size_bytes, run_pipeline
+from app.pdf_report import build_pdf_report
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 FRONTEND_FILE = PROJECT_ROOT / "frontend" / "index.html"
@@ -150,3 +154,35 @@ async def create_analysis(
                 os.remove(temp_path)
             except OSError:
                 pass
+
+@app.get("/api/v1/analyses/{analysis_id}/pdf")
+def download_analysis_pdf(analysis_id: str):
+    """Generate and download a PDF report for a completed analysis."""
+    if not re.fullmatch(r"[a-f0-9]{12}", analysis_id):
+        raise HTTPException(status_code=400, detail="Invalid analysis ID.")
+
+    analysis_path = PROJECT_ROOT / "output" / f"analysis_{analysis_id}.json"
+
+    if not analysis_path.is_file():
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+
+    try:
+        data = json.loads(analysis_path.read_text(encoding="utf-8"))
+        pdf_bytes = build_pdf_report(data)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not generate PDF report: {exc}",
+        ) from exc
+
+    filename = f"secureme-analysis-{analysis_id}.pdf"
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
