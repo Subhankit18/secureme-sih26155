@@ -1,80 +1,69 @@
 from __future__ import annotations
 
-import os
+import re
 import tempfile
 from pathlib import Path
-import io
-import json
-import re
-from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from app.pipeline import ALLOWED_EXTENSIONS, _max_size_bytes, run_pipeline
+from app.database import get_db
+from app.db_models import ReviewMapping
 from app.pdf_report import build_pdf_report
+from app.pipeline import ALLOWED_EXTENSIONS, PROJECT_ROOT, run_pipeline
+from app.reaudit import run_reaudit
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-FRONTEND_FILE = PROJECT_ROOT / "frontend" / "index.html"
-UPLOAD_DIR = PROJECT_ROOT / "uploads"
-
-# Create the temporary upload directory automatically.
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(
     title="SIH26155 Member 2 Local API",
-    version="0.1.1",
+    version="0.1.2",
 )
 
 
+class ReviewDecision(BaseModel):
+    reviewed_by: str
+    normalized_field: str | None = None
+    normalized_value: dict | None = None
+
+
 @app.get("/api/v1/health")
-def health() -> dict[str, str]:
+def health():
     return {
         "status": "ok",
-        "service": "sih26155-member2-local",
+        "service": "SIH26155 Member 2 Local API",
     }
 
 
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
-def index() -> HTMLResponse:
-    if not FRONTEND_FILE.is_file():
-        raise HTTPException(
-            status_code=500,
-            detail=f"Frontend file not found: {FRONTEND_FILE}",
+@app.get("/", response_class=HTMLResponse)
+def home():
+    frontend = PROJECT_ROOT / "frontend" / "index.html"
+
+    if frontend.exists():
+        return frontend.read_text(
+            encoding="utf-8"
         )
 
-    try:
-        html = FRONTEND_FILE.read_text(encoding="utf-8")
-
-        return HTMLResponse(
-            content=html,
-            headers={"Cache-Control": "no-store"},
-        )
-
-    except OSError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not read frontend: {exc}",
-        ) from exc
-
-
-def _safe_original_name(filename: str | None) -> str:
-    name = Path(filename or "configuration.conf").name
-
-    if not name or name in {".", ".."}:
-        name = "configuration.conf"
-
-    return name
+    return """
+    <html>
+        <head>
+            <title>SIH26155 Member 2</title>
+        </head>
+        <body>
+            <h1>SIH26155 Member 2 Local API</h1>
+            <p>API is running.</p>
+            <p><a href="/docs">Open Swagger UI</a></p>
+        </body>
+    </html>
+    """
 
 
 @app.post("/api/v1/analyses")
 async def create_analysis(
-    file: Annotated[
-        UploadFile,
-        File(description="Plain-text network configuration"),
-    ],
+    file: UploadFile = File(...),
 ):
-    filename = _safe_original_name(file.filename)
+    filename = file.filename or "config.conf"
     suffix = Path(filename).suffix.lower()
 
     if suffix not in ALLOWED_EXTENSIONS:
@@ -86,47 +75,37 @@ async def create_analysis(
             ),
         )
 
-    max_bytes = _max_size_bytes()
+    data = await file.read()
 
-    data = await file.read(max_bytes + 1)
-
-    if len(data) > max_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Configuration file is larger than {max_bytes // 1024} KB.",
-        )
-
-    try:
-        text = data.decode("utf-8", errors="strict")
-
-    except UnicodeDecodeError as exc:
+    if not data:
         raise HTTPException(
             status_code=400,
-            detail="Configuration file must be valid UTF-8 plain text.",
-        ) from exc
+            detail="Uploaded configuration is empty.",
+        )
 
-    temp_path: str | None = None
+    temp_path = None
 
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            suffix=suffix,
-            prefix="sih26155_",
-            dir=UPLOAD_DIR,
             delete=False,
-        ) as temp:
-            temp.write(text)
-            temp_path = temp.name
+            suffix=suffix,
+        ) as temp_file:
+            temp_file.write(data)
+            temp_path = Path(temp_file.name)
 
-        # IMPORTANT:
-        # The existing run_pipeline() remains the single source
-        # of truth for parsing, normalization, compliance, and risk.
-        result = run_pipeline(temp_path)
+        result = run_pipeline(str(temp_path))
 
-        # Show the actual uploaded filename in the response.
-        result.source_file = filename
-        result.normalized.source_file = filename
+        archive_dir = PROJECT_ROOT / "config_archive"
+        archive_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        archive_path = (
+            archive_dir / f"{result.analysis_id}{suffix}"
+        )
+
+        archive_path.write_bytes(data)
 
         return result.model_dump()
 
@@ -149,40 +128,266 @@ async def create_analysis(
         ) from exc
 
     finally:
-        if temp_path:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
+        if temp_path and temp_path.exists():
+            temp_path.unlink()
 
-@app.get("/api/v1/analyses/{analysis_id}/pdf")
-def download_analysis_pdf(analysis_id: str):
-    """Generate and download a PDF report for a completed analysis."""
-    if not re.fullmatch(r"[a-f0-9]{12}", analysis_id):
-        raise HTTPException(status_code=400, detail="Invalid analysis ID.")
 
-    analysis_path = PROJECT_ROOT / "output" / f"analysis_{analysis_id}.json"
-
-    if not analysis_path.is_file():
-        raise HTTPException(status_code=404, detail="Analysis not found.")
-
-    try:
-        data = json.loads(analysis_path.read_text(encoding="utf-8"))
-        pdf_bytes = build_pdf_report(data)
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not generate PDF report: {exc}",
-        ) from exc
-
-    filename = f"secureme-analysis-{analysis_id}.pdf"
-
-    return StreamingResponse(
-        io.BytesIO(pdf_bytes),
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "no-store",
-        },
+@app.get(
+    "/api/v1/analyses/{analysis_id}/reviews"
+)
+def get_reviews(
+    analysis_id: str,
+    db: Session = Depends(get_db),
+):
+    reviews = (
+        db.query(ReviewMapping)
+        .filter(
+            ReviewMapping.analysis_id == analysis_id
+        )
+        .order_by(
+            ReviewMapping.line_number
+        )
+        .all()
     )
 
+    return [
+        {
+            "id": str(review.id),
+            "analysis_id": review.analysis_id,
+            "line_number": review.line_number,
+            "source_command": review.source_command,
+            "ai_category": review.ai_category,
+            "ai_interpretation": review.ai_interpretation,
+            "ai_confidence": (
+                float(review.ai_confidence)
+                if review.ai_confidence is not None
+                else None
+            ),
+            "normalized_field": review.normalized_field,
+            "normalized_value": review.normalized_value,
+            "status": review.status,
+            "reviewed_by": review.reviewed_by,
+            "created_at": review.created_at,
+            "updated_at": review.updated_at,
+        }
+        for review in reviews
+    ]
+
+
+@app.post(
+    "/api/v1/reviews/{review_id}/approve"
+)
+def approve_review(
+    review_id: str,
+    decision: ReviewDecision,
+    db: Session = Depends(get_db),
+):
+    review = (
+        db.query(ReviewMapping)
+        .filter(
+            ReviewMapping.id == review_id
+        )
+        .first()
+    )
+
+    if review is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Review not found.",
+        )
+
+    if review.status == "APPROVED":
+        raise HTTPException(
+            status_code=400,
+            detail="Review is already approved.",
+        )
+
+    if review.status == "REJECTED":
+        raise HTTPException(
+            status_code=400,
+            detail="Rejected review cannot be approved.",
+        )
+
+    review.status = "APPROVED"
+    review.reviewed_by = decision.reviewed_by
+    review.normalized_field = decision.normalized_field
+    review.normalized_value = decision.normalized_value
+
+    db.commit()
+    db.refresh(review)
+
+    return {
+        "status": "APPROVED",
+        "review_id": str(review.id),
+        "analysis_id": review.analysis_id,
+    }
+
+
+@app.post(
+    "/api/v1/reviews/{review_id}/reject"
+)
+def reject_review(
+    review_id: str,
+    decision: ReviewDecision,
+    db: Session = Depends(get_db),
+):
+    review = (
+        db.query(ReviewMapping)
+        .filter(
+            ReviewMapping.id == review_id
+        )
+        .first()
+    )
+
+    if review is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Review not found.",
+        )
+
+    if review.status == "APPROVED":
+        raise HTTPException(
+            status_code=400,
+            detail="Approved review cannot be rejected.",
+        )
+
+    review.status = "REJECTED"
+    review.reviewed_by = decision.reviewed_by
+
+    db.commit()
+    db.refresh(review)
+
+    return {
+        "status": "REJECTED",
+        "review_id": str(review.id),
+        "analysis_id": review.analysis_id,
+    }
+
+
+@app.post(
+    "/api/v1/analyses/{analysis_id}/reaudit"
+)
+def reaudit_analysis(
+    analysis_id: str,
+    db: Session = Depends(get_db),
+):
+    if not re.fullmatch(
+        r"[a-f0-9]{12}",
+        analysis_id,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid analysis ID.",
+        )
+
+    archive_dir = PROJECT_ROOT / "config_archive"
+
+    candidates = [
+        path
+        for path in archive_dir.glob(
+            f"{analysis_id}.*"
+        )
+        if path.suffix.lower()
+        in ALLOWED_EXTENSIONS
+    ]
+
+    if not candidates:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Original configuration unavailable. "
+                "Upload the configuration again."
+            ),
+        )
+
+    try:
+        result = run_reaudit(
+            parent_analysis_id=analysis_id,
+            config_path=candidates[0],
+            db=db,
+        )
+
+        return result.model_dump()
+
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Re-audit failed: {exc}",
+        ) from exc
+
+
+@app.get(
+    "/api/v1/analyses/{analysis_id}/pdf"
+)
+def download_analysis_pdf(
+    analysis_id: str,
+):
+    if not re.fullmatch(
+        r"[a-f0-9]{12}",
+        analysis_id,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid analysis ID.",
+        )
+
+    output_path = (
+        PROJECT_ROOT
+        / "output"
+        / f"analysis_{analysis_id}.json"
+    )
+
+    if not output_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Analysis not found.",
+        )
+
+    pdf_dir = PROJECT_ROOT / "output" / "pdf"
+
+    pdf_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    pdf_path = (
+        pdf_dir
+        / f"analysis_{analysis_id}.pdf"
+    )
+
+    try:
+        import json
+
+        data = json.loads(
+            output_path.read_text(
+                encoding="utf-8"
+            )
+        )
+
+        pdf_bytes = build_pdf_report(data)
+
+        pdf_path.write_bytes(pdf_bytes)
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF generation failed: {exc}",
+        ) from exc
+
+    return FileResponse(
+        path=pdf_path,
+        media_type="application/pdf",
+        filename=f"analysis_{analysis_id}.pdf",
+    )
